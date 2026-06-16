@@ -24,6 +24,33 @@ MicroPython. The Pico W must be flashed via USB to update.
 | ----- | --------- | ----------- |
 | TBD | subscribe | Data to display |
 
+## Screens
+
+Screens are **views into a concern**, not jobs owned by this device. The GFX
+node is one surface that can reflect them — the same concern may also show on
+e-ink, LEDs, or an arrow. Each screen pulls from data above the bus (an MQTT
+topic, or an HTTP endpoint / Prometheus when the uplink is up) and renders it.
+
+Architecture per screen: `fetch()` (get data), `render(display)` (draw), and a
+refresh `interval`. The main loop cycles screens or navigates by button. New
+screens are independent — adding one shouldn't touch the others.
+
+Salvaged from the retired `edge-display` use-case:
+
+| Screen | Source | Shows |
+| ------ | ------ | ----- |
+| Cluster health | Prometheus | 3 k3s nodes up/down, CPU/mem |
+| Timelapse status | smart-timelapse-pipeline | capturing? frames today, last upload |
+| Pi0Cam status | Pi0Cam metrics | camera up/down, last image, uptime |
+| Network overview | hub | connected devices / bandwidth |
+| Weather / sun | API or local sensor | sunrise/sunset (timelapse context) |
+| Custom text / alert | MQTT push | ad-hoc message to the screen |
+
+Design notes carried over: pull don't push (systems needn't know about the
+display); graceful degradation (show last-known value + a staleness indicator
+if a source is unreachable); stay lightweight (Pico W has ~264 KB RAM — a k3s
+API gateway can pre-format JSON if parsing on-device is too heavy).
+
 ## Part of Edge-NET
 
 See [Edge-NET](https://github.com/jackwaddington/edge-net) for the full architecture and list of nodes.
