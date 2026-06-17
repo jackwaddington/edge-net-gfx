@@ -9,20 +9,31 @@ A node in [Edge-NET](https://github.com/jackwaddington/edge-net). A Pi Pico W wi
 
 ## What it does
 
-- Connects to the Edge-NET WiFi network
-- Connects to the Mosquitto MQTT broker on the hub
-- Subscribes to topics and displays the data on the GFX screen
-- When the home network uplink is available, can pull data from Prometheus/Grafana for display
+An **output node** on the **ambient + interrupt** pattern (see `main.py`):
+
+- Connects to the Edge-NET WiFi (`Pirie`) and the Mosquitto broker (`10.1.1.1`)
+- **Ambient:** shows an idle `edge-net` screen with a dim backlight
+- **Interrupt:** on a gamepad button press, shows that button big with a matching
+  backlight (A red, B green, X blue, Y rainbow)
+- **Fallback:** ~30s with no command → drifts back to ambient
+
+It subscribes to the gamepad's topics directly and decides for itself what to do —
+the gamepad publishes intent, this node reacts. Verified live: gamepad → broker →
+GFX, sub-second response.
 
 ## Software
 
-MicroPython. The Pico W must be flashed via USB to update.
+MicroPython. The Pico W must be flashed via USB to update (OTA over MQTT is the
+planned path — see the edge-net repo `docs/PLANNING.md`).
+
+Requires `umqtt.simple` in `lib/umqtt/` (from micropython-lib). Copy `main.py`
+and a filled-in `WIFI_CONFIG.py` (from `WIFI_CONFIG.example.py`) to the board.
 
 ## MQTT topics
 
 | Topic | Direction | Description |
 | ----- | --------- | ----------- |
-| TBD | subscribe | Data to display |
+| `edge-net/gamepad/button/#` | subscribe | gamepad button events (`press` / `release`) |
 
 ## Screens
 
