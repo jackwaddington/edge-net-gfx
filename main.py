@@ -4,12 +4,13 @@ Ambient + interrupt: shows an idle "edge-net" screen, listens on MQTT, and when
 a gamepad button is pressed it shows that button big with a matching backlight.
 After IDLE_RETURN seconds with no command it drifts back to ambient.
 
-Subscribes: edge-net/gamepad/button/#  (payloads "press" / "release")
+Subscribes: edge-net/gamepad/button/#   (payloads "press" / "release")
+Publishes:  edge-net/gfx/button/<a-e>   (its own 5 buttons — two-way node)
 """
 
 import time
 import network
-from gfx_pack import GfxPack
+from gfx_pack import GfxPack, SWITCH_A, SWITCH_B, SWITCH_C, SWITCH_D, SWITCH_E
 from umqtt.simple import MQTTClient
 import WIFI_CONFIG as W
 
@@ -33,6 +34,13 @@ COLOURS = {
     "start":  ("START", (255, 255, 255, 0)),
     "select": ("SELECT", (255, 120, 0, 0)),
 }
+
+# The GFX Pack's own 5 buttons — this node is two-way: it shows incoming MQTT
+# AND publishes its own buttons, like any input node.
+LOCAL_BUTTONS = {
+    "a": SWITCH_A, "b": SWITCH_B, "c": SWITCH_C, "d": SWITCH_D, "e": SWITCH_E,
+}
+local_state = {n: False for n in LOCAL_BUTTONS}
 
 
 def hsv(h):
@@ -117,6 +125,18 @@ while True:
         except Exception as e2:
             print("reconnect fail:", e2)
             time.sleep(1)
+
+    # publish our own button edges -> any node can react
+    for name, sw in LOCAL_BUTTONS.items():
+        pressed = gp.switch_pressed(sw)
+        if pressed != local_state[name]:
+            local_state[name] = pressed
+            event = "press" if pressed else "release"
+            try:
+                mqtt.publish("edge-net/gfx/button/" + name, event)
+                print("pub gfx/button/" + name, event)
+            except Exception as e:
+                print("gfx btn pub fail:", e)
 
     now = time.ticks_ms()
     btn = state["btn"]
