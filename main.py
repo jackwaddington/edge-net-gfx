@@ -3,6 +3,7 @@
 Modes (joystick Y to navigate menu, GamepadQT A/START to enter):
   SNAKE       — classic snake on 128x64 LCD, joystick steers
   TEXT        — compose a word, joystick X scrolls alphabet, send to LED strip
+  LIGHTS      — 3-page wizard: colour → effect → speed; backlight mirrors strip
 
 GFX Pack buttons A-E still publish to edge-net/gfx/button/<a-e> as before.
 GamepadQT SELECT returns to menu from any mode.
@@ -21,6 +22,7 @@ import WIFI_CONFIG as W
 import seesaw
 import textmatrix
 from snake import Snake
+from lights import LightsMode
 
 # ── Hardware ────────────────────────────────────────────────────────────────
 # STEMMA QT connector: I2C0 on GP4 (SDA) / GP5 (SCL)
@@ -97,8 +99,9 @@ def new_press(cur, prev, pin):
 MENU = 0
 SNAKE_MODE = 1
 TEXT_MODE = 2
+LIGHTS_MODE = 3
 
-MENU_ITEMS = ["SNAKE", "TEXT"]
+MENU_ITEMS = ["SNAKE", "TEXT", "LIGHTS"]
 SNAKE_TICK = 150   # ms per snake step
 JOY_REPEAT = 250   # ms between repeated nav/scroll triggers
 
@@ -138,6 +141,10 @@ def draw_text():
 # ── Snake ────────────────────────────────────────────────────────────────────
 snake = Snake()
 snake_ts = 0
+
+# ── Lights ───────────────────────────────────────────────────────────────────
+lights = LightsMode()
+lights_frame_ts = 0
 
 # ── State ────────────────────────────────────────────────────────────────────
 mode = MENU
@@ -202,10 +209,22 @@ while True:
             word.clear()
             char_idx = 0
             draw_text()
+        elif mode == LIGHTS_MODE:
+            lights.reset()
+            lights_frame_ts = now
+            lights.draw(display, LCD_W)
+            pr, pg, pb = lights.preview_backlight()
+            gp.set_backlight(pr, pg, pb, 0)
         prev_mode = mode
 
-    # ── SELECT -> menu (any mode) ───────────────────────────────────────────
+    # ── SELECT -> menu (any mode); stop lights broadcast if active ─────────
     if new_press(cur_btns, prev_gp_btns, 0):   # pin 0 = select
+        if mode == LIGHTS_MODE and lights.broadcasting:
+            lights.broadcasting = False
+            try:
+                mqtt.publish(b"edge-net/gamepad/led/clear", b"")
+            except Exception:
+                pass
         mode = MENU
 
     # ── Mode logic ──────────────────────────────────────────────────────────
@@ -221,7 +240,7 @@ while True:
             joy_nav_ts = now
         # A (pin 5) or START (pin 16) confirm
         if new_press(cur_btns, prev_gp_btns, 5) or new_press(cur_btns, prev_gp_btns, 16):
-            mode = SNAKE_MODE if menu_sel == 0 else TEXT_MODE
+            mode = [SNAKE_MODE, TEXT_MODE, LIGHTS_MODE][menu_sel]
 
     elif mode == SNAKE_MODE:
         snake.steer(dx, dy)
@@ -263,6 +282,48 @@ while True:
                 textmatrix.send_word(w_str, mqtt)
                 gp.set_backlight(0, 0, 25, 0)
                 draw_text()
+
+    elif mode == LIGHTS_MODE:
+        if lights.broadcasting:
+            if time.ticks_diff(now, lights_frame_ts) >= lights.frame_ms():
+                frame = lights.next_strip_frame()
+                try:
+                    mqtt.publish(b"edge-net/gamepad/frame", frame)
+                except Exception:
+                    pass
+                pr, pg, pb = lights.preview_backlight()
+                gp.set_backlight(pr, pg, pb, 0)
+                lights_frame_ts = now
+        else:
+            # Preview animation on backlight at a fixed rate
+            if time.ticks_diff(now, lights_frame_ts) >= 200:
+                lights.tick()
+                pr, pg, pb = lights.preview_backlight()
+                gp.set_backlight(pr, pg, pb, 0)
+                lights_frame_ts = now
+
+            nav_ready = time.ticks_diff(now, joy_nav_ts) > JOY_REPEAT
+            if nav_ready and dx == -1:
+                lights.scroll(-1)
+                lights.draw(display, LCD_W)
+                joy_nav_ts = now
+            elif nav_ready and dx == 1:
+                lights.scroll(1)
+                lights.draw(display, LCD_W)
+                joy_nav_ts = now
+
+            if new_press(cur_btns, prev_gp_btns, 5):    # A = next page / send
+                if lights.page < 2:
+                    lights.page += 1
+                    lights.draw(display, LCD_W)
+                else:
+                    lights.broadcasting = True
+                    lights_frame_ts = 0
+                    lights.draw_live(display, LCD_W)
+            if new_press(cur_btns, prev_gp_btns, 1):    # B = back a page
+                if lights.page > 0:
+                    lights.page -= 1
+                    lights.draw(display, LCD_W)
 
     prev_gp_btns = cur_btns
     time.sleep_ms(30)
