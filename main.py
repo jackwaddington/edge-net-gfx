@@ -243,7 +243,7 @@ while True:
             mode = [SNAKE_MODE, TEXT_MODE, LIGHTS_MODE][menu_sel]
 
     elif mode == SNAKE_MODE:
-        snake.steer(dx, dy)
+        snake.steer(dx, -dy)
         if time.ticks_diff(now, snake_ts) >= SNAKE_TICK:
             snake.step()
             snake.draw(display)
