@@ -4,8 +4,10 @@ Modes (joystick Y to navigate menu, GamepadQT A/START to enter):
   SNAKE       — classic snake on 128x64 LCD, joystick steers
   TEXT        — compose a word, joystick X scrolls alphabet, send to LED strip
   LIGHTS      — 3-page wizard: colour → effect → speed; backlight mirrors strip
+  CHESS       — chess clock; GFX-A = P1, GFX-E = P2, C = pause, D = reset
 
-GFX Pack buttons A-E still publish to edge-net/gfx/button/<a-e> as before.
+GFX Pack buttons A-E still publish to edge-net/gfx/button/<a-e> as before
+(except A/C/D/E are intercepted in CHESS mode).
 GamepadQT SELECT returns to menu from any mode.
 
 Hardware note: STEMMA QT on GFX Pack -> I2C0, SDA=GP4, SCL=GP5.
@@ -23,6 +25,8 @@ import seesaw
 import textmatrix
 from snake import Snake
 from lights import LightsMode
+import ujson
+from chess_clock import ChessClock
 
 # ── Hardware ────────────────────────────────────────────────────────────────
 # STEMMA QT connector: I2C0 on GP4 (SDA) / GP5 (SCL)
@@ -100,20 +104,26 @@ MENU = 0
 SNAKE_MODE = 1
 TEXT_MODE = 2
 LIGHTS_MODE = 3
+CHESS_MODE = 4
 
-MENU_ITEMS = ["SNAKE", "TEXT", "LIGHTS"]
+MENU_ITEMS = ["SNAKE", "TEXT", "LIGHTS", "CHESS"]
+MENU_VISIBLE = 3   # items shown at once (3 × 20px fits 64px display)
 SNAKE_TICK = 150   # ms per snake step
 JOY_REPEAT = 250   # ms between repeated nav/scroll triggers
 
 # ── Menu draw ───────────────────────────────────────────────────────────────
-def draw_menu(sel):
+def draw_menu(sel, offset):
     display.set_pen(0)
     display.clear()
     display.set_pen(15)
-    display.text("MODE", 2, 2, LCD_W, 2)
-    for i, name in enumerate(MENU_ITEMS):
-        prefix = "> " if i == sel else "  "
-        display.text(prefix + name, 2, 22 + i * 20, LCD_W, 2)
+    visible = MENU_ITEMS[offset:offset + MENU_VISIBLE]
+    for i, name in enumerate(visible):
+        prefix = "> " if (offset + i) == sel else "  "
+        display.text(prefix + name, 2, 2 + i * 20, LCD_W - 12, 2)
+    if offset > 0:
+        display.text("^", LCD_W - 10, 2, 10, 1)
+    if offset + MENU_VISIBLE < len(MENU_ITEMS):
+        display.text("v", LCD_W - 10, 54, 10, 1)
     display.update()
 
 
@@ -146,13 +156,54 @@ snake_ts = 0
 lights = LightsMode()
 lights_frame_ts = 0
 
+# ── Chess clock ──────────────────────────────────────────────────────────────
+chess = ChessClock()
+
 # ── State ────────────────────────────────────────────────────────────────────
 mode = MENU
 prev_mode = -1
 menu_sel = 0
+menu_offset = 0
 prev_gp_btns = 0
 joy_nav_ts = 0      # last joystick nav repeat (menu + text scroll)
+chess_draw_ts = 0
 last_ping = time.ticks_ms()
+
+# ── Chess helpers ────────────────────────────────────────────────────────────
+_P1_FRAME = b"FF6600" * 50   # warm orange for P1 on LED strip
+_P2_FRAME = b"0066FF" * 50   # cool blue  for P2 on LED strip
+
+
+def _chess_publish(kind, player):
+    p_str = "p1" if player == 0 else "p2"
+    try:
+        mqtt.publish("edge-net/gfx/chess/" + kind, ujson.dumps({"player": p_str}))
+    except Exception:
+        pass
+    sounds = {"start": "chime.wav", "switch": "tick.wav",
+              "flag": "flag.wav", "warning": "warning.wav"}
+    if kind in sounds:
+        try:
+            mqtt.publish("edge/hub/audio/play", ujson.dumps({"file": sounds[kind]}))
+        except Exception:
+            pass
+    if kind in ("start", "switch"):
+        frame = _P1_FRAME if chess.active == 0 else _P2_FRAME
+        try:
+            mqtt.publish(b"edge-net/gamepad/frame", frame)
+        except Exception:
+            pass
+
+
+def _chess_btn(player):
+    ev = chess.press(player)
+    if ev is None:
+        return
+    r, g, b, w = chess.backlight_rgb()
+    gp.set_backlight(r, g, b, w)
+    chess.draw(display, LCD_W)
+    _chess_publish(ev, player)
+
 
 # ── Main loop ────────────────────────────────────────────────────────────────
 while True:
@@ -173,16 +224,33 @@ while True:
             pass
         last_ping = now
 
-    # GFX Pack own buttons -> publish edge-to-edge
+    # GFX Pack own buttons -> publish edge-to-edge (chess mode intercepts A/C/D/E)
     for name, sw in LOCAL_BUTTONS.items():
         pressed = gp.switch_pressed(sw)
         if pressed != local_state[name]:
             local_state[name] = pressed
-            ev = "press" if pressed else "release"
-            try:
-                mqtt.publish("edge-net/gfx/button/" + name, ev)
-            except Exception:
-                pass
+            if mode == CHESS_MODE and name in ("a", "c", "d", "e"):
+                if pressed:
+                    if name == "a":
+                        _chess_btn(0)
+                    elif name == "e":
+                        _chess_btn(1)
+                    elif name == "c":
+                        chess.pause_toggle()
+                        r, g, b, w = chess.backlight_rgb()
+                        gp.set_backlight(r, g, b, w)
+                        chess.draw(display, LCD_W)
+                    elif name == "d":
+                        chess.reset()
+                        r, g, b, w = chess.backlight_rgb()
+                        gp.set_backlight(r, g, b, w)
+                        chess.draw(display, LCD_W)
+            else:
+                ev = "press" if pressed else "release"
+                try:
+                    mqtt.publish("edge-net/gfx/button/" + name, ev)
+                except Exception:
+                    pass
 
     # Read GamepadQT (fallback on I2C error: no change)
     try:
@@ -197,8 +265,8 @@ while True:
     # ── Mode entry ──────────────────────────────────────────────────────────
     if mode != prev_mode:
         if mode == MENU:
-            gp.set_backlight(0, 0, 0, 20)
-            draw_menu(menu_sel)
+            gp.set_backlight(0, 0, 0, 80)
+            draw_menu(menu_sel, menu_offset)
         elif mode == SNAKE_MODE:
             gp.set_backlight(0, 25, 0, 0)
             snake.reset()
@@ -215,6 +283,12 @@ while True:
             lights.draw(display, LCD_W)
             pr, pg, pb = lights.preview_backlight()
             gp.set_backlight(pr, pg, pb, 0)
+        elif mode == CHESS_MODE:
+            chess.reset()
+            chess_draw_ts = now
+            r, g, b, w = chess.backlight_rgb()
+            gp.set_backlight(r, g, b, w)
+            chess.draw(display, LCD_W)
         prev_mode = mode
 
     # ── SELECT -> menu (any mode); stop lights broadcast if active ─────────
@@ -232,15 +306,21 @@ while True:
         nav_ready = time.ticks_diff(now, joy_nav_ts) > JOY_REPEAT
         if nav_ready and dy == -1:
             menu_sel = (menu_sel - 1) % len(MENU_ITEMS)
-            draw_menu(menu_sel)
+            if menu_sel < menu_offset:
+                menu_offset = menu_sel
+            draw_menu(menu_sel, menu_offset)
             joy_nav_ts = now
         elif nav_ready and dy == 1:
             menu_sel = (menu_sel + 1) % len(MENU_ITEMS)
-            draw_menu(menu_sel)
+            if menu_sel >= menu_offset + MENU_VISIBLE:
+                menu_offset = menu_sel - MENU_VISIBLE + 1
+            if menu_sel == 0:           # wrapped around to top
+                menu_offset = 0
+            draw_menu(menu_sel, menu_offset)
             joy_nav_ts = now
         # A (pin 5) or START (pin 16) confirm
         if new_press(cur_btns, prev_gp_btns, 5) or new_press(cur_btns, prev_gp_btns, 16):
-            mode = [SNAKE_MODE, TEXT_MODE, LIGHTS_MODE][menu_sel]
+            mode = [SNAKE_MODE, TEXT_MODE, LIGHTS_MODE, CHESS_MODE][menu_sel]
 
     elif mode == SNAKE_MODE:
         snake.steer(dx, -dy)
@@ -324,6 +404,20 @@ while True:
                 if lights.page > 0:
                     lights.page -= 1
                     lights.draw(display, LCD_W)
+
+    elif mode == CHESS_MODE:
+        ev = chess.update()
+        if ev is not None:
+            kind, player = ev
+            r, g, b, w = chess.backlight_rgb()
+            gp.set_backlight(r, g, b, w)
+            chess.draw(display, LCD_W)
+            _chess_publish(kind, player)
+            chess_draw_ts = now
+        elif chess.active != -1 and not chess.paused:
+            if time.ticks_diff(now, chess_draw_ts) >= 1000:
+                chess.draw(display, LCD_W)
+                chess_draw_ts = now
 
     prev_gp_btns = cur_btns
     time.sleep_ms(30)
